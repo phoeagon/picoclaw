@@ -154,11 +154,11 @@ func (t *CronTool) Execute(ctx context.Context, args map[string]any) *ToolResult
 	case "update":
 		return t.updateJob(ctx, args)
 	case "remove":
-		return t.removeJob(args)
+		return t.removeJob(ctx, args)
 	case "enable":
-		return t.enableJob(args, true)
+		return t.enableJob(ctx, args, true)
 	case "disable":
-		return t.enableJob(args, false)
+		return t.enableJob(ctx, args, false)
 	default:
 		return ErrorResult(fmt.Sprintf("unknown action: %s", action))
 	}
@@ -377,10 +377,18 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 	return SilentResult(fmt.Sprintf("Cron job updated:\n%s", formatCronJobJSON(updated)))
 }
 
-func (t *CronTool) removeJob(args map[string]any) *ToolResult {
+func (t *CronTool) removeJob(ctx context.Context, args map[string]any) *ToolResult {
 	jobID, ok := args["job_id"].(string)
 	if !ok || jobID == "" {
 		return ErrorResult("job_id is required for remove")
+	}
+
+	job, ok := t.cronService.GetJob(jobID)
+	if !ok {
+		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
+	}
+	if !t.canAccessJob(ctx, job) {
+		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
 	}
 
 	if t.cronService.RemoveJob(jobID) {
@@ -534,14 +542,18 @@ func (t *CronTool) canAccessJob(ctx context.Context, job *cron.CronJob) bool {
 	if constants.IsInternalChannel(channel) {
 		return true
 	}
+
 	chatID := ToolChatID(ctx)
 	if channel == "" || chatID == "" {
 		return false
 	}
-	if job.Payload.Command != "" {
+	if job.Payload.Channel != channel || job.Payload.To != chatID {
 		return false
 	}
-	return job.Payload.Channel == channel && job.Payload.To == chatID
+	if job.Payload.Command != "" {
+		return isCommandAllowedRemote(channel, chatID, t.commandAllowedRemotes)
+	}
+	return true
 }
 
 func formatCronJobJSON(job *cron.CronJob) string {
@@ -552,14 +564,22 @@ func formatCronJobJSON(job *cron.CronJob) string {
 	return string(data)
 }
 
-func (t *CronTool) enableJob(args map[string]any, enable bool) *ToolResult {
+func (t *CronTool) enableJob(ctx context.Context, args map[string]any, enable bool) *ToolResult {
 	jobID, ok := args["job_id"].(string)
 	if !ok || jobID == "" {
 		return ErrorResult("job_id is required for enable/disable")
 	}
 
-	job := t.cronService.EnableJob(jobID, enable)
-	if job == nil {
+	job, ok := t.cronService.GetJob(jobID)
+	if !ok {
+		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
+	}
+	if !t.canAccessJob(ctx, job) {
+		return ErrorResult(fmt.Sprintf("Job %s is not accessible from this channel", jobID))
+	}
+
+	updatedJob := t.cronService.EnableJob(jobID, enable)
+	if updatedJob == nil {
 		return ErrorResult(fmt.Sprintf("Job %s not found", jobID))
 	}
 
@@ -567,7 +587,7 @@ func (t *CronTool) enableJob(args map[string]any, enable bool) *ToolResult {
 	if !enable {
 		status = "disabled"
 	}
-	return SilentResult(fmt.Sprintf("Cron job '%s' %s", job.Name, status))
+	return SilentResult(fmt.Sprintf("Cron job '%s' %s", updatedJob.Name, status))
 }
 
 // ExecuteJob executes a cron job through the agent
